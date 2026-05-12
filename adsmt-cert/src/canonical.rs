@@ -1,0 +1,183 @@
+//! Canonical certificate data structures.
+//!
+//! A [`Certificate`] is a list of named [`Step`]s culminating in a
+//! distinguished conclusion. Each step references prior steps by
+//! [`StepId`] and carries the resulting [`Sequent`] so an independent
+//! checker can verify the step locally without re-running the kernel.
+
+use std::sync::Arc;
+
+use adsmt_core::{Term, Theorem, TyVar, Type, Var};
+
+use crate::witness::{InstanceWitness, TheoryWitness};
+
+/// Identifier referring to a previously emitted step within a certificate.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StepId(pub u32);
+
+impl StepId {
+    pub fn as_str_prefixed(self) -> String {
+        format!("s{}", self.0)
+    }
+}
+
+/// A sequent `Γ ⊢ φ`. Mirrors [`Theorem`] but is publicly constructable
+/// because certificate data is untrusted by definition — the checker
+/// re-verifies each step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sequent {
+    pub hyps: Vec<Term>,
+    pub concl: Term,
+}
+
+impl Sequent {
+    pub fn from_theorem(t: &Theorem) -> Self {
+        Self { hyps: t.hyps().to_vec(), concl: t.concl().clone() }
+    }
+}
+
+impl From<&Theorem> for Sequent {
+    fn from(t: &Theorem) -> Self { Self::from_theorem(t) }
+}
+
+/// A single proof step.
+#[derive(Clone, Debug)]
+pub struct Step {
+    pub id: StepId,
+    pub body: StepBody,
+    pub result: Sequent,
+}
+
+/// Which rule produced this step.
+#[derive(Clone, Debug)]
+pub enum StepBody {
+    Assume(Term),
+    Refl(Term),
+    Trans { lhs: StepId, rhs: StepId },
+    Abs { var: Var, eq: StepId },
+    Beta { redex: Term },
+    EqMp { iff: StepId, p: StepId },
+    Deduct { a: StepId, b: StepId },
+    Inst { sigma: Vec<(Arc<Var>, Term)>, thm: StepId },
+    InstType { sigma: Vec<(Arc<TyVar>, Type)>, thm: StepId },
+    Theory {
+        name: String,
+        witness: TheoryWitness,
+        parents: Vec<StepId>,
+    },
+    Instance {
+        relation: String,
+        types: Vec<Type>,
+        witness: InstanceWitness,
+    },
+    /// Abductive marker: `formula` is assumed, not proven.
+    /// `explain` is the human-readable note threaded from lu-kb's
+    /// `abduce ... explain "..."` directive.
+    Assumed {
+        formula: Term,
+        explain: Option<String>,
+    },
+}
+
+/// A complete proof certificate.
+#[derive(Clone, Debug)]
+pub struct Certificate {
+    pub steps: Vec<Step>,
+    pub conclusion: StepId,
+}
+
+impl Certificate {
+    pub fn final_sequent(&self) -> Option<&Sequent> {
+        self.steps.get(self.conclusion.0 as usize).map(|s| &s.result)
+    }
+
+    /// True iff the certificate contains at least one `Assumed` step,
+    /// i.e. the proof relies on an abducted hypothesis.
+    pub fn is_abductive(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s.body, StepBody::Assumed { .. }))
+    }
+
+    pub fn assumed_steps(&self) -> impl Iterator<Item = &Step> {
+        self.steps
+            .iter()
+            .filter(|s| matches!(s.body, StepBody::Assumed { .. }))
+    }
+}
+
+/// Mutable builder that hands out fresh step ids.
+#[derive(Default, Debug)]
+pub struct CertBuilder {
+    steps: Vec<Step>,
+}
+
+impl CertBuilder {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn add(&mut self, body: StepBody, result: Sequent) -> StepId {
+        let id = StepId(self.steps.len() as u32);
+        self.steps.push(Step { id, body, result });
+        id
+    }
+
+    pub fn len(&self) -> usize { self.steps.len() }
+    pub fn is_empty(&self) -> bool { self.steps.is_empty() }
+
+    pub fn last_id(&self) -> Option<StepId> {
+        self.steps.last().map(|s| s.id)
+    }
+
+    pub fn finalize(self, conclusion: StepId) -> Certificate {
+        Certificate { steps: self.steps, conclusion }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adsmt_core::{Kind, Type};
+
+    fn int_() -> Type { Type::const_("Int", Kind::Type) }
+
+    #[test]
+    fn builder_assigns_increasing_ids() {
+        let mut b = CertBuilder::new();
+        let x = Term::var("x", int_());
+        let s0 = b.add(
+            StepBody::Refl(x.clone()),
+            Sequent { hyps: vec![], concl: Term::mk_eq(x.clone(), x.clone()).unwrap() },
+        );
+        let s1 = b.add(
+            StepBody::Refl(x.clone()),
+            Sequent { hyps: vec![], concl: Term::mk_eq(x.clone(), x).unwrap() },
+        );
+        assert_eq!(s0, StepId(0));
+        assert_eq!(s1, StepId(1));
+        assert_eq!(b.len(), 2);
+    }
+
+    #[test]
+    fn finalize_records_conclusion() {
+        let mut b = CertBuilder::new();
+        let x = Term::var("x", int_());
+        let s0 = b.add(
+            StepBody::Refl(x.clone()),
+            Sequent { hyps: vec![], concl: Term::mk_eq(x.clone(), x).unwrap() },
+        );
+        let cert = b.finalize(s0);
+        assert_eq!(cert.conclusion, s0);
+        assert!(cert.final_sequent().is_some());
+    }
+
+    #[test]
+    fn detects_abductive_certificate() {
+        let mut b = CertBuilder::new();
+        let p = Term::var("p", Type::bool_());
+        let s0 = b.add(
+            StepBody::Assumed { formula: p.clone(), explain: Some("missing".into()) },
+            Sequent { hyps: vec![p.clone()], concl: p },
+        );
+        let cert = b.finalize(s0);
+        assert!(cert.is_abductive());
+        assert_eq!(cert.assumed_steps().count(), 1);
+    }
+}

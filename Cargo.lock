@@ -19,6 +19,7 @@ name = "adsmt-cert"
 version = "0.1.0"
 dependencies = [
  "adsmt-core",
+ "indexmap",
  "thiserror",
 ]
 

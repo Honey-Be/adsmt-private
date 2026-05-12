@@ -8,3 +8,4 @@ description = "S-expression proof certificate format with Lean4/Alethe/JSON emit
 [dependencies]
 adsmt-core.workspace = true
 thiserror.workspace = true
+indexmap.workspace = true
