@@ -1,0 +1,10 @@
+[package]
+name = "adsmt-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "S-expression proof certificate format with Lean4/Alethe/JSON emit backends"
+
+[dependencies]
+adsmt-core.workspace = true
+thiserror.workspace = true

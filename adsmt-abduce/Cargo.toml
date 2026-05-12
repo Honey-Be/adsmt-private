@@ -1,0 +1,14 @@
+[package]
+name = "adsmt-abduce"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Abductive engine: SLD with abducible insertion + per-theory abduction + minimization and ranking"
+
+[dependencies]
+adsmt-core.workspace = true
+adsmt-cert.workspace = true
+adsmt-theory.workspace = true
+adsmt-class.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true

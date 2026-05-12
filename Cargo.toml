@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "adsmt-core",
+    "adsmt-cert",
+    "adsmt-theory",
+    "adsmt-class",
+    "adsmt-quant",
+    "adsmt-abduce",
+    "adsmt-engine",
+    "adsmt-parser",
+    "adsmt-cli",
+    "adsmt-ffi",
+]
+exclude = ["external/logicutils"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[workspace.dependencies]
+adsmt-core = { path = "adsmt-core" }
+adsmt-cert = { path = "adsmt-cert" }
+adsmt-theory = { path = "adsmt-theory" }
+adsmt-class = { path = "adsmt-class" }
+adsmt-quant = { path = "adsmt-quant" }
+adsmt-abduce = { path = "adsmt-abduce" }
+adsmt-engine = { path = "adsmt-engine" }
+adsmt-parser = { path = "adsmt-parser" }
+
+thiserror = "2.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+clap = { version = "4.6", features = ["derive"] }
+smallvec = "1.13"
+indexmap = "2.6"
+
+[profile.release]
+lto = "thin"

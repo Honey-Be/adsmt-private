@@ -1,0 +1,16 @@
+[package]
+name = "adsmt-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DPLL(T) main loop with incremental push/pop, theory combination glue, and the public Solver API"
+
+[dependencies]
+adsmt-core.workspace = true
+adsmt-cert.workspace = true
+adsmt-theory.workspace = true
+adsmt-class.workspace = true
+adsmt-quant.workspace = true
+adsmt-abduce.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true

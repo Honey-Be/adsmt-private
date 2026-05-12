@@ -1,0 +1,12 @@
+[package]
+name = "adsmt-class"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Type-class layer (T_class): relations, instances, dictionary passing, functional dependencies"
+
+[dependencies]
+adsmt-core.workspace = true
+adsmt-cert.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true

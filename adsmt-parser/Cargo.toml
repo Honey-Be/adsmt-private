@@ -1,0 +1,11 @@
+[package]
+name = "adsmt-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SMT-LIB v2 parser/emitter and lu-kb surface parser"
+
+[dependencies]
+adsmt-core.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "adsmt-quant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Quantifier handling: Miller-pattern higher-order E-matching, conflict-based, bounded enumerative"
+
+[dependencies]
+adsmt-core.workspace = true
+adsmt-cert.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+smallvec.workspace = true

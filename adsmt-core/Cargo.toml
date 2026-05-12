@@ -1,0 +1,11 @@
+[package]
+name = "adsmt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HOL+HKT kernel: terms, types, kinds, and the 12 inference rules"
+
+[dependencies]
+thiserror.workspace = true
+smallvec.workspace = true
+indexmap.workspace = true

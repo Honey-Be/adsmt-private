@@ -1,0 +1,16 @@
+[package]
+name = "adsmt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lu-smt: command-line driver for adsmt"
+
+[[bin]]
+name = "lu-smt"
+path = "src/main.rs"
+
+[dependencies]
+adsmt-engine.workspace = true
+adsmt-parser.workspace = true
+clap.workspace = true
+thiserror.workspace = true
