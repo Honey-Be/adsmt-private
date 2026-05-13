@@ -298,6 +298,116 @@ impl Term {
             None
         }
     }
+
+    // === Boolean built-ins (v0.3) ===
+    //
+    // These are kernel-recognized symbols whose semantics is honoured
+    // by the engine. They aren't yet *defined* in the kernel sense
+    // (no axioms relating `not p` to falsehood, etc.) — definitional
+    // theorems land when the engine grows a proof-producing path.
+
+    /// Built-in `true : Bool`.
+    pub fn true_const() -> Term {
+        Term::const_("true", Type::bool_())
+    }
+
+    /// Built-in `false : Bool`.
+    pub fn false_const() -> Term {
+        Term::const_("false", Type::bool_())
+    }
+
+    /// Built-in `not : Bool -> Bool`.
+    pub fn not_const() -> Term {
+        Term::const_(
+            "not",
+            Type::fun(Type::bool_(), Type::bool_()).expect("Bool kinds"),
+        )
+    }
+
+    fn bool_binop(name: &str) -> Term {
+        let bb = Type::fun(Type::bool_(), Type::bool_()).expect("Bool kinds");
+        let ty = Type::fun(Type::bool_(), bb).expect("Bool kinds");
+        Term::const_(name, ty)
+    }
+
+    /// Built-in `and : Bool -> Bool -> Bool`.
+    pub fn and_const() -> Term { Self::bool_binop("and") }
+
+    /// Built-in `or : Bool -> Bool -> Bool`.
+    pub fn or_const() -> Term { Self::bool_binop("or") }
+
+    /// Built-in `=> : Bool -> Bool -> Bool` (implication).
+    pub fn imp_const() -> Term { Self::bool_binop("=>") }
+
+    fn require_bool(t: &Term) -> KernelResult<()> {
+        if t.type_of() != Type::bool_() {
+            return Err(KernelError::TypeMismatch {
+                expected: "Bool".into(),
+                found: t.type_of().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn mk_not(p: Term) -> KernelResult<Term> {
+        Self::require_bool(&p)?;
+        Term::app(Term::not_const(), p)
+    }
+
+    pub fn mk_and(p: Term, q: Term) -> KernelResult<Term> {
+        Self::require_bool(&p)?;
+        Self::require_bool(&q)?;
+        Term::app(Term::app(Term::and_const(), p)?, q)
+    }
+
+    pub fn mk_or(p: Term, q: Term) -> KernelResult<Term> {
+        Self::require_bool(&p)?;
+        Self::require_bool(&q)?;
+        Term::app(Term::app(Term::or_const(), p)?, q)
+    }
+
+    pub fn mk_imp(p: Term, q: Term) -> KernelResult<Term> {
+        Self::require_bool(&p)?;
+        Self::require_bool(&q)?;
+        Term::app(Term::app(Term::imp_const(), p)?, q)
+    }
+
+    /// Decompose `not P` returning `P`.
+    pub fn dest_not(&self) -> Option<Term> {
+        if let Term::App(f, p) = self {
+            if let Term::Const(c) = &**f {
+                if c.name == "not" {
+                    return Some((**p).clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn dest_bool_binop(name: &str, t: &Term) -> Option<(Term, Term)> {
+        if let Term::App(outer, q) = t {
+            if let Term::App(head, p) = &**outer {
+                if let Term::Const(c) = &**head {
+                    if c.name == name {
+                        return Some(((**p).clone(), (**q).clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn dest_and(&self) -> Option<(Term, Term)> { Self::dest_bool_binop("and", self) }
+    pub fn dest_or(&self) -> Option<(Term, Term)> { Self::dest_bool_binop("or", self) }
+    pub fn dest_imp(&self) -> Option<(Term, Term)> { Self::dest_bool_binop("=>", self) }
+
+    pub fn is_true_const(&self) -> bool {
+        matches!(self, Term::Const(c) if c.name == "true")
+    }
+
+    pub fn is_false_const(&self) -> bool {
+        matches!(self, Term::Const(c) if c.name == "false")
+    }
 }
 
 fn extend_tyvars(dst: &mut Vec<Arc<TyVar>>, src: &[Arc<TyVar>]) {
@@ -487,5 +597,46 @@ mod tests {
         let (l, r) = eq.dest_eq().unwrap();
         assert_eq!(l, x);
         assert_eq!(r, y);
+    }
+
+    #[test]
+    fn boolean_round_trips() {
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+
+        let n = Term::mk_not(p.clone()).unwrap();
+        assert_eq!(n.dest_not().unwrap(), p);
+        assert_eq!(n.type_of(), Type::bool_());
+
+        let conj = Term::mk_and(p.clone(), q.clone()).unwrap();
+        let (l, r) = conj.dest_and().unwrap();
+        assert_eq!(l, p);
+        assert_eq!(r, q);
+
+        let disj = Term::mk_or(p.clone(), q.clone()).unwrap();
+        assert!(disj.dest_and().is_none());
+        assert!(disj.dest_or().is_some());
+
+        let imp = Term::mk_imp(p.clone(), q.clone()).unwrap();
+        let (l, r) = imp.dest_imp().unwrap();
+        assert_eq!(l, p);
+        assert_eq!(r, q);
+    }
+
+    #[test]
+    fn boolean_ops_reject_non_bool() {
+        let x = Term::var("x", int_());
+        assert!(Term::mk_not(x.clone()).is_err());
+        let p = Term::var("p", Type::bool_());
+        assert!(Term::mk_and(x, p).is_err());
+    }
+
+    #[test]
+    fn true_false_constants() {
+        let t = Term::true_const();
+        let f = Term::false_const();
+        assert!(t.is_true_const());
+        assert!(f.is_false_const());
+        assert!(!t.is_false_const());
     }
 }

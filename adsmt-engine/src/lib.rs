@@ -8,6 +8,8 @@
 //! correctness on the subset of inputs it understands; full DPLL(T)
 //! with SAT integration lands in v0.3.
 
+pub mod bool_solver;
+pub mod cnf;
 pub mod dpllt;
 pub mod result;
 pub mod solver;

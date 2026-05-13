@@ -1,22 +1,22 @@
 //! `lu-smt` — command-line driver for adsmt.
 //!
-//! v0.1 reads an SMT-LIB v2 script from stdin (or a file given as the
-//! single positional argument) and dispatches a usable subset of
-//! commands to [`adsmt_engine::Solver`]:
+//! v0.3 first slice: routes SMT-LIB expressions through
+//! [`adsmt_parser::convert_expr`] so the full propositional Boolean
+//! fragment (`not`/`and`/`or`/`=>`/`=`) is recognized and reasoned
+//! over by the engine's CNF + unit-propagation layer.
 //!
-//! - `set-logic LOGIC`        — accepted, ignored beyond logging
-//! - `declare-const NAME Bool` — records the atom name
-//! - `assert E`               — assert `E` (positive) or `(not E)`
-//! - `check-sat`              — print `sat`/`unsat`/`unknown`
-//! - `push N` / `pop N`       — incremental scope stack
+//! Commands supported:
+//! - `set-logic LOGIC`        — accepted with warning if outside v0.3 scope
+//! - `declare-const NAME Bool` — records the atom's sort
+//! - `assert E`               — convert to Term and assert
+//! - `check-sat`              — prints `sat`/`unsat`/`unknown`
+//! - `push N` / `pop N`       — scope stack
 //! - `reset` / `reset-assertions` — clear state
 //! - `exit`                   — terminate
 //!
-//! Exit codes follow the contract from sec 34 Q73: `0=sat`, `1=unsat`,
-//! `2=unknown`, `3=abductive`, `10` on parse error, `11` on type
-//! error, `12` on configuration error.
+//! Exit codes follow sec 34 Q73: `0=sat`, `1=unsat`, `2=unknown`,
+//! `3=abductive`, `10` parse error, `11` type error, `12` config error.
 
-use std::collections::HashMap;
 use std::io::Read;
 use std::process::ExitCode;
 
@@ -24,8 +24,9 @@ use clap::Parser as ClapParser;
 
 use adsmt_core::{Term, Type};
 use adsmt_engine::{SatResult, Solver};
+use adsmt_parser::{convert_expr, parse_smtlib, ConvertError, SymbolTable};
 use adsmt_parser::sexpr::SExpr;
-use adsmt_parser::smtlib::{parse_smtlib, Command};
+use adsmt_parser::smtlib::Command;
 
 #[derive(ClapParser)]
 #[command(name = "lu-smt", version)]
@@ -113,21 +114,19 @@ enum DispatchResult {
 
 struct Driver {
     solver: Solver,
-    /// Declared Boolean constants. Future logics (LIA/LRA) will need a
-    /// richer table — kept simple for v0.1's QF_UF subset.
-    atoms: HashMap<String, Type>,
+    symbols: SymbolTable,
 }
 
 impl Driver {
     fn new() -> Self {
-        Self { solver: Solver::new(), atoms: HashMap::new() }
+        Self { solver: Solver::new(), symbols: SymbolTable::new() }
     }
 
     fn dispatch(&mut self, cmd: Command) -> DispatchResult {
         match cmd {
             Command::SetLogic(logic) => {
                 if !is_logic_supported(&logic) {
-                    eprintln!("lu-smt: warning: logic '{logic}' not implemented in v0.1 (accepting anyway)");
+                    eprintln!("lu-smt: warning: logic '{logic}' not fully implemented in v0.3 (accepting anyway)");
                 }
                 DispatchResult::Continue
             }
@@ -137,14 +136,13 @@ impl Driver {
                 if sort_str != "Bool" {
                     return DispatchResult::Error(
                         11,
-                        format!("declare-const '{name}': v0.1 supports only `Bool` sort (got `{sort_str}`)"),
+                        format!("declare-const '{name}': v0.3 supports only `Bool` sort (got `{sort_str}`)"),
                     );
                 }
-                self.atoms.insert(name, Type::bool_());
+                self.symbols.declare(name, Type::bool_());
                 DispatchResult::Continue
             }
             Command::DeclareSort { .. } | Command::DeclareFun { .. } | Command::DefineFun { .. } => {
-                // Accepted but unused — the v0.1 engine only handles Bool atoms.
                 DispatchResult::Continue
             }
             Command::Assert(expr) => match self.assert_expr(&expr) {
@@ -159,7 +157,6 @@ impl Driver {
             },
             Command::CheckSatAssuming(_) => DispatchResult::CheckSat(LastStatus::Unknown),
             Command::GetModel | Command::GetUnsatCore | Command::GetProof => {
-                // These print informational placeholders in v0.1.
                 println!("()");
                 DispatchResult::Continue
             }
@@ -173,7 +170,11 @@ impl Driver {
                 self.solver.pop(n);
                 DispatchResult::Continue
             }
-            Command::Reset => { self.solver.reset(); self.atoms.clear(); DispatchResult::Continue }
+            Command::Reset => {
+                self.solver.reset();
+                self.symbols = SymbolTable::new();
+                DispatchResult::Continue
+            }
             Command::ResetAssertions => { self.solver.reset(); DispatchResult::Continue }
             Command::Exit => DispatchResult::Exit,
             Command::Raw(s) => {
@@ -184,30 +185,44 @@ impl Driver {
     }
 
     fn assert_expr(&mut self, e: &SExpr) -> Result<(), String> {
-        let (atom_name, polarity) = parse_literal(e)
-            .ok_or_else(|| format!("v0.1 only supports `(assert P)` or `(assert (not P))` where P is a Bool atom; got {e}"))?;
-        if !self.atoms.contains_key(&atom_name) {
-            // Accept implicit declarations to be friendly to simple scripts.
-            self.atoms.insert(atom_name.clone(), Type::bool_());
+        // Auto-declare bare Bool symbols on first use so simple
+        // scripts don't require explicit `declare-const`.
+        autodeclare_bools(e, &mut self.symbols);
+        let term: Term = convert_expr(e, &self.symbols)
+            .map_err(|err: ConvertError| err.to_string())?;
+        if term.type_of() != Type::bool_() {
+            return Err(format!("asserted expression is not Bool (got {})", term.type_of()));
         }
-        let term = Term::var(&atom_name, Type::bool_());
-        self.solver.assert_with_polarity(term, polarity);
+        self.solver.assert(term);
         Ok(())
     }
 }
 
-fn parse_literal(e: &SExpr) -> Option<(String, bool)> {
-    if let Some(name) = e.as_symbol() {
-        return Some((name.to_string(), true));
-    }
-    if let Some(list) = e.as_list() {
-        if list.len() == 2 && list[0].as_symbol() == Some("not") {
-            if let Some(name) = list[1].as_symbol() {
-                return Some((name.to_string(), false));
+/// Walk `e` and add any bare symbols not yet in `table` as Bool atoms.
+/// Conservative — only registers unknown bare symbols, leaves
+/// operators untouched.
+fn autodeclare_bools(e: &SExpr, table: &mut SymbolTable) {
+    match e {
+        SExpr::Symbol(s) => {
+            // Skip Boolean literals and operator-shaped names; only
+            // register identifier-style symbols that don't look like
+            // built-ins.
+            if !is_operator(s) && table.lookup(s).is_none() {
+                table.declare(s, Type::bool_());
             }
         }
+        SExpr::List(items) => {
+            // Skip the operator position; recurse into arguments.
+            for sub in items.iter().skip(1) {
+                autodeclare_bools(sub, table);
+            }
+        }
+        _ => {}
     }
-    None
+}
+
+fn is_operator(s: &str) -> bool {
+    matches!(s, "not" | "and" | "or" | "=>" | "=" | "true" | "false" | "ite" | "xor")
 }
 
 fn is_logic_supported(logic: &str) -> bool {

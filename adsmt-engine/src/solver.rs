@@ -9,6 +9,8 @@ use adsmt_core::Term;
 use adsmt_theory::polite::Combination;
 use adsmt_theory::uf::Uf;
 
+use crate::bool_solver::{unit_propagate, BoolResult};
+use crate::cnf::{flatten_to_clauses, Clause, Lit};
 use crate::dpllt::{self, LoopOutcome};
 use crate::result::{Abductive, SatResult};
 use crate::state::Scope;
@@ -119,19 +121,100 @@ impl Solver {
     }
 
     pub fn check_sat(&mut self) -> SatResult {
+        // (1) Decompose every asserted (term, polarity) into CNF clauses.
+        let mut clauses: Vec<Clause> = Vec::new();
         let lits = self.all_literals();
-        // Fresh theory state for each check_sat — the placeholder UF
-        // accumulates state across asserts but doesn't yet handle
-        // multi-check sequences cleanly. v0.3 will move to a proper
-        // DPLL(T) trail that doesn't require this reset.
+        for (term, polarity) in &lits {
+            let asserted = if *polarity {
+                term.clone()
+            } else {
+                match Term::mk_not(term.clone()) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        return SatResult::Unknown {
+                            reason: format!(
+                                "non-Boolean asserted negatively: {}",
+                                term.type_of()
+                            ),
+                        };
+                    }
+                }
+            };
+            match flatten_to_clauses(&asserted) {
+                Some(cs) => clauses.extend(cs),
+                None => {
+                    // Compound shape not handled by v0.3 alpha CNF flattener.
+                    // Fall back to the theory-routing path below for the
+                    // sub-set of literals we can route.
+                    return self.check_via_theories(&lits);
+                }
+            }
+        }
+
+        // (2) Run unit propagation over the clause set.
+        match unit_propagate(&clauses) {
+            BoolResult::Sat => {
+                // Propagation found a satisfying assignment; theories
+                // may still reject. Route to theories as a second
+                // opinion.
+                self.check_via_theories(&lits)
+            }
+            BoolResult::Unsat => SatResult::Unsat { certificate: None },
+            BoolResult::Unknown => {
+                // Propagation stuck; theories might disagree but
+                // can't surface OR-decisions. v0.5 wires in proper
+                // decision splitting.
+                SatResult::Unknown {
+                    reason: "Boolean propagation reached fixpoint with open clauses (decision splitting pending v0.5)".into(),
+                }
+            }
+        }
+    }
+
+    /// Legacy path: route raw literals straight to the theory layer.
+    /// Used as a fallback when the CNF flattener can't decompose a
+    /// compound assertion.
+    fn check_via_theories(&mut self, lits: &[(Term, bool)]) -> SatResult {
         self.theories.reset();
-        match dpllt::run_once(&mut self.theories, &lits) {
+        // Strip compound asserts — only send shape-recognizable
+        // literals (atom or `(not atom)`) to theories. Anything more
+        // complex is opaque to v0.3 theories.
+        let mut routable: Vec<(Term, bool)> = Vec::new();
+        for (t, p) in lits {
+            if t.dest_and().is_some() || t.dest_or().is_some() || t.dest_imp().is_some() {
+                continue;
+            }
+            if let Some(inner) = t.dest_not() {
+                routable.push((inner, !p));
+            } else {
+                routable.push((t.clone(), *p));
+            }
+        }
+        match dpllt::run_once(&mut self.theories, &routable) {
             LoopOutcome::Sat => SatResult::Sat,
             LoopOutcome::Unsat { .. } => SatResult::Unsat { certificate: None },
             LoopOutcome::Unknown { theory, reason } => SatResult::Unknown {
                 reason: format!("{theory}: {reason}"),
             },
         }
+    }
+
+    /// Expose the flattened literals as classical CNF — useful for
+    /// debugging the boundary between Boolean and theory reasoning.
+    #[doc(hidden)]
+    pub fn debug_clauses(&self) -> Vec<Clause> {
+        let lits = self.all_literals();
+        let mut clauses = Vec::new();
+        for (t, p) in &lits {
+            let asserted = if *p { t.clone() }
+                else { Term::mk_not(t.clone()).unwrap_or_else(|_| t.clone()) };
+            if let Some(cs) = flatten_to_clauses(&asserted) {
+                clauses.extend(cs);
+            } else {
+                clauses.push(vec![Lit::new(t.clone(), *p)]);
+            }
+        }
+        clauses
     }
 
     pub fn abduce(&mut self, goal: &Term) -> Abductive {
@@ -242,5 +325,91 @@ mod tests {
         s.reject(&cands[0]);
         let again = s.abduce(&p).candidates;
         assert!(again.is_empty());
+    }
+
+    // === v0.3 Boolean structure tests ===
+
+    #[test]
+    fn conjunction_decomposes_to_units() {
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(Term::mk_and(p, q).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Sat));
+    }
+
+    #[test]
+    fn conjunction_with_contradiction_is_unsat() {
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let conj = Term::mk_and(p.clone(), Term::mk_not(p).unwrap()).unwrap();
+        s.assert(conj);
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
+    }
+
+    #[test]
+    fn implication_modus_ponens() {
+        // p, p → q  ⟹  sat (and q forced)
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(p.clone());
+        s.assert(Term::mk_imp(p, q).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Sat));
+    }
+
+    #[test]
+    fn implication_modus_tollens_is_unsat() {
+        // p, p → q, ¬q  ⟹  unsat
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(p.clone());
+        s.assert(Term::mk_imp(p, q.clone()).unwrap());
+        s.assert(Term::mk_not(q).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
+    }
+
+    #[test]
+    fn disjunction_alone_is_unknown_without_decisions() {
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(Term::mk_or(p, q).unwrap());
+        match s.check_sat() {
+            SatResult::Unknown { .. } => {}
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disjunction_with_unit_premise_propagates() {
+        // p, p ∨ q  ⟹  sat (propagation handles it)
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(p.clone());
+        s.assert(Term::mk_or(p, q).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Sat));
+    }
+
+    #[test]
+    fn false_assertion_is_immediately_unsat() {
+        let mut s = Solver::new();
+        s.assert(Term::false_const());
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
+    }
+
+    #[test]
+    fn de_morgan_negated_conjunction() {
+        // ¬(p ∧ q) ∧ p ∧ q → unsat
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        let conj = Term::mk_and(p.clone(), q.clone()).unwrap();
+        s.assert(Term::mk_not(conj).unwrap());
+        s.assert(p);
+        s.assert(q);
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
     }
 }

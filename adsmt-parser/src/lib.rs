@@ -5,9 +5,11 @@
 //! parser plugs into logicutils' grammar (post v0.x-smt branch
 //! integration) and re-exports the AST from there.
 
+pub mod convert;
 pub mod sexpr;
 pub mod smtlib;
 pub mod kb;
 
+pub use convert::{convert_expr, ConvertError, SymbolTable};
 pub use sexpr::{lex_sexpr, parse_sexpr, parse_sexprs, ParseError, SExpr, Token};
 pub use smtlib::{parse_smtlib, Command, SmtLibError};
