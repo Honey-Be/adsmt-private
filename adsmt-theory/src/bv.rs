@@ -30,22 +30,50 @@ impl Bv {
     pub fn new() -> Self { Self::default() }
 
     /// If `t` is a BV binop applied to two literals, evaluate it and
-    /// return the resulting literal. Otherwise return `t` unchanged.
+    /// return the resulting literal. v0.9 also handles
+    /// identity/absorption laws when one operand is a literal:
+    /// `bvand x 0 = 0`, `bvand x (all-ones) = x`,
+    /// `bvor  x 0 = x`, `bvor  x (all-ones) = all-ones`,
+    /// `bvxor x 0 = x`,
+    /// `bvadd x 0 = x`, `bvsub x 0 = x`, `bvmul x 0 = 0`, `bvmul x 1 = x`.
     fn reduce_binop(t: &Term) -> Term {
-        if let Some((op, w, lhs, rhs)) = t.dest_bv_binop() {
-            if let (Some((va, _)), Some((vb, _))) = (lhs.dest_bv_lit(), rhs.dest_bv_lit()) {
-                let mask: u128 = if w >= 128 { u128::MAX } else { (1u128 << w) - 1 };
-                let result = match op.as_str() {
-                    "bvand" => (va & vb) & mask,
-                    "bvor"  => (va | vb) & mask,
-                    "bvxor" => (va ^ vb) & mask,
-                    "bvadd" => va.wrapping_add(vb) & mask,
-                    "bvsub" => va.wrapping_sub(vb) & mask,
-                    "bvmul" => va.wrapping_mul(vb) & mask,
-                    _ => return t.clone(),
-                };
-                return Term::bv_lit(result, w);
-            }
+        let Some((op, w, lhs, rhs)) = t.dest_bv_binop() else { return t.clone(); };
+        let mask: u128 = if w >= 128 { u128::MAX } else { (1u128 << w) - 1 };
+
+        // Both-literal: full evaluation.
+        if let (Some((va, _)), Some((vb, _))) = (lhs.dest_bv_lit(), rhs.dest_bv_lit()) {
+            let result = match op.as_str() {
+                "bvand" => (va & vb) & mask,
+                "bvor"  => (va | vb) & mask,
+                "bvxor" => (va ^ vb) & mask,
+                "bvadd" => va.wrapping_add(vb) & mask,
+                "bvsub" => va.wrapping_sub(vb) & mask,
+                "bvmul" => va.wrapping_mul(vb) & mask,
+                _ => return t.clone(),
+            };
+            return Term::bv_lit(result, w);
+        }
+
+        // Single-literal simplifications (v0.9 partial bit-blasting).
+        let lhs_lit = lhs.dest_bv_lit().map(|(v, _)| v);
+        let rhs_lit = rhs.dest_bv_lit().map(|(v, _)| v);
+        let all_ones = mask;
+
+        match (op.as_str(), lhs_lit, rhs_lit) {
+            // identity / absorption with `rhs` literal
+            ("bvand", _, Some(0)) | ("bvmul", _, Some(0)) => return Term::bv_lit(0, w),
+            ("bvand", _, Some(v)) if v == all_ones => return lhs,
+            ("bvor",  _, Some(0)) | ("bvadd", _, Some(0))
+                | ("bvsub", _, Some(0)) | ("bvxor", _, Some(0)) => return lhs,
+            ("bvor",  _, Some(v)) if v == all_ones => return Term::bv_lit(all_ones, w),
+            ("bvmul", _, Some(1)) => return lhs,
+            // identity / absorption with `lhs` literal (commutative ops only)
+            ("bvand", Some(0), _) | ("bvmul", Some(0), _) => return Term::bv_lit(0, w),
+            ("bvand", Some(v), _) if v == all_ones => return rhs,
+            ("bvor",  Some(0), _) | ("bvadd", Some(0), _) | ("bvxor", Some(0), _) => return rhs,
+            ("bvor",  Some(v), _) if v == all_ones => return Term::bv_lit(all_ones, w),
+            ("bvmul", Some(1), _) => return rhs,
+            _ => {}
         }
         t.clone()
     }
@@ -207,6 +235,40 @@ mod tests {
         let lhs = Term::mk_bvand(Term::bv_lit(0b1100, 4), Term::bv_lit(0b1010, 4), 4).unwrap();
         let eq = Term::mk_eq(lhs, Term::bv_lit(0b1111, 4)).unwrap();
         assert!(matches!(bv.assert(Literal::positive(eq).unwrap()), AssertResult::Conflict { .. }));
+    }
+
+    #[test]
+    fn bvand_absorbs_zero() {
+        // bvand(x, 0) = 0 — eq with anything but 0 is unsat.
+        let mut bv = Bv::new();
+        let x = Term::var("x", Term::bv_sort(8));
+        let conj = Term::mk_bvand(x, Term::bv_lit(0, 8), 8).unwrap();
+        let eq_zero = Term::mk_eq(conj.clone(), Term::bv_lit(0, 8)).unwrap();
+        assert!(matches!(bv.assert(Literal::positive(eq_zero).unwrap()), AssertResult::Accepted));
+        let eq_nonzero = Term::mk_eq(conj, Term::bv_lit(5, 8)).unwrap();
+        assert!(matches!(bv.assert(Literal::positive(eq_nonzero).unwrap()), AssertResult::Conflict { .. }));
+    }
+
+    #[test]
+    fn bvor_with_all_ones_yields_all_ones() {
+        let mut bv = Bv::new();
+        let x = Term::var("x", Term::bv_sort(8));
+        let disj = Term::mk_bvor(x, Term::bv_lit(0xFF, 8), 8).unwrap();
+        let eq = Term::mk_eq(disj, Term::bv_lit(0xFF, 8)).unwrap();
+        assert!(matches!(bv.assert(Literal::positive(eq).unwrap()), AssertResult::Accepted));
+    }
+
+    #[test]
+    fn bvxor_with_zero_is_identity() {
+        // bvxor(x, 0) = x, so `(bvxor x 0) = (bv 5 8)` implies x = 5.
+        let mut bv = Bv::new();
+        let x = Term::var("x", Term::bv_sort(8));
+        let xor = Term::mk_bvxor(x.clone(), Term::bv_lit(0, 8), 8).unwrap();
+        let eq = Term::mk_eq(xor, Term::bv_lit(5, 8)).unwrap();
+        assert!(matches!(bv.assert(Literal::positive(eq).unwrap()), AssertResult::Accepted));
+        // Conflicting binding to a different value:
+        let eq2 = Term::mk_eq(x, Term::bv_lit(7, 8)).unwrap();
+        assert!(matches!(bv.assert(Literal::positive(eq2).unwrap()), AssertResult::Conflict { .. }));
     }
 
     #[test]

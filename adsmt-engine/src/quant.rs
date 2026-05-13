@@ -64,6 +64,39 @@ fn gather_subterms(t: &Term, u: &mut TermUniverse) {
     }
 }
 
+/// Quantifier-handling tier reached by a given call to
+/// [`instantiate_one`]. v0.9 records this so the surrounding engine
+/// loop can escalate to Tier 4 (abductive scaffolding) when all
+/// term-based strategies are exhausted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Tier { One, Three, Exhausted }
+
+/// For a single `∀v. body`, generate instantiations of `body` by
+/// matching `body` (treated as a flex pattern over `v`) against terms
+/// in `universe`. Returns instantiated bodies (positive polarity)
+/// alongside the tier that produced them.
+pub fn instantiate_with_tier(
+    var: &Var,
+    body: &Term,
+    universe: &TermUniverse,
+) -> (Vec<Term>, Tier) {
+    let res = instantiate_one(var, body, universe);
+    let tier = if res.is_empty() {
+        Tier::Exhausted
+    } else {
+        // Tier classification: if at least one match came from a
+        // pattern-matching step over universe terms whose shape
+        // mirrors the body, classify as Tier One; otherwise the
+        // fallback enumeration produced it (Tier Three).
+        if universe.iter().any(|t| body.alpha_eq(t)) {
+            Tier::One
+        } else {
+            Tier::Three
+        }
+    };
+    (res, tier)
+}
+
 /// For a single `∀v. body`, generate instantiations of `body` by
 /// matching `body` (treated as a flex pattern over `v`) against terms
 /// in `universe`. Returns instantiated bodies (positive polarity).

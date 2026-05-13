@@ -199,6 +199,29 @@ impl Solver {
                 other => return other,
             }
         }
+        // Tier 4: budget exhausted → abductive escalation. Emit a
+        // synthetic candidate per remaining quantifier saying
+        // "instantiation needed". The user's `smt_abduce` flow can
+        // surface this as a `sorry` hole.
+        let lits = self.all_literals();
+        let (quants, _) = crate::quant::partition_quantifiers(&lits);
+        if !quants.is_empty() {
+            let mut candidates: Vec<adsmt_abduce::sld::Candidate> = Vec::new();
+            for (var, body) in &quants {
+                let formula = Term::mk_forall(var.clone(), body.clone())
+                    .unwrap_or_else(|_| body.clone());
+                candidates.push(adsmt_abduce::sld::Candidate {
+                    hypotheses: vec![formula],
+                    explanations: vec![Some(format!(
+                        "quantifier `∀{}:{}. {}` needs a witness instantiation \
+                         the engine could not synthesize (tier 4 escalation)",
+                        var.name, var.ty, body
+                    ))],
+                    sources: vec!["quant-tier4".into()],
+                });
+            }
+            return SatResult::Abductive { candidates };
+        }
         SatResult::Unknown {
             reason: format!("quantifier instantiation budget ({QUANTIFIER_ROUNDS} rounds) exhausted"),
         }
@@ -244,13 +267,14 @@ impl Solver {
             }
         }
 
-        // (2) Run the configured SAT backend. With the `cadical`
-        //     feature on, route to CaDiCaL; otherwise use the
-        //     built-in DPLL (unit propagation + bounded decision
-        //     splitting, depth budget 16).
-        #[cfg(feature = "cadical")]
+        // (2) Run the configured SAT backend. Priority order:
+        //     `oxiz` (Path A+B default, see oxiz_relationship.md)
+        //     > `cadical` (C++ FFI) > built-in DPLL.
+        #[cfg(feature = "oxiz")]
+        let sat_result = crate::oxiz_backend::solve(&clauses);
+        #[cfg(all(feature = "cadical", not(feature = "oxiz")))]
         let sat_result = crate::cadical_backend::solve(&clauses);
-        #[cfg(not(feature = "cadical"))]
+        #[cfg(not(any(feature = "oxiz", feature = "cadical")))]
         let sat_result = dpll(&clauses, 16);
         match sat_result {
             BoolResult::Sat => {

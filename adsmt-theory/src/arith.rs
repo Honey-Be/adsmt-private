@@ -29,16 +29,132 @@ impl Default for Bounds {
     fn default() -> Self { Self { lower: None, upper: None } }
 }
 
+/// A two-variable linear inequality `x + y op k` recorded for v0.9
+/// Fourier-Motzkin elimination.
+#[derive(Clone, Debug)]
+struct TwoVar {
+    x: String,
+    y: String,
+    op: &'static str, // "<=" | "<" | ">=" | ">"
+    k: i128,
+}
+
 pub struct LinArith {
     name_: &'static str,
     bounds: HashMap<String, Bounds>,
+    two_vars: Vec<TwoVar>,
     conflict: Option<TheoryWitness>,
-    scope_stack: Vec<HashMap<String, Bounds>>,
+    scope_stack: Vec<(HashMap<String, Bounds>, Vec<TwoVar>)>,
 }
 
 impl LinArith {
-    pub fn lia() -> Self { Self { name_: "LIA", bounds: HashMap::new(), conflict: None, scope_stack: Vec::new() } }
-    pub fn lra() -> Self { Self { name_: "LRA", bounds: HashMap::new(), conflict: None, scope_stack: Vec::new() } }
+    pub fn lia() -> Self {
+        Self { name_: "LIA", bounds: HashMap::new(), two_vars: Vec::new(),
+               conflict: None, scope_stack: Vec::new() }
+    }
+    pub fn lra() -> Self {
+        Self { name_: "LRA", bounds: HashMap::new(), two_vars: Vec::new(),
+               conflict: None, scope_stack: Vec::new() }
+    }
+
+    /// Recognise `(<= (+ x y) k)` and friends — two-variable sum
+    /// inequalities. Returns `(x_name, y_name, op, k)` if matched.
+    fn parse_sum_comparison(t: &Term) -> Option<(String, String, &'static str, i128)> {
+        let Term::App(outer, rhs) = t else { return None; };
+        let Term::App(head, sum) = &**outer else { return None; };
+        let Term::Const(c) = &**head else { return None; };
+        let op = match c.name.as_str() {
+            "<=" | "le" => "<=",
+            "<"  | "lt" => "<",
+            ">=" | "ge" => ">=",
+            ">"  | "gt" => ">",
+            _ => return None,
+        };
+        let k = Self::int_lit(rhs)?;
+        // sum must be `(+ x y)` with x, y both variables.
+        if let Term::App(plus_outer, y) = &**sum {
+            if let Term::App(plus_head, x) = &**plus_outer {
+                if let Term::Const(pc) = &**plus_head {
+                    if pc.name == "+" {
+                        if let (Term::Var(vx), Term::Var(vy)) = (&**x, &**y) {
+                            return Some((vx.name.clone(), vy.name.clone(), op, k));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Apply Fourier-Motzkin: given `x + y op k` and existing single-
+    /// variable bounds on `x` and `y`, derive new bounds on each
+    /// variable. Returns Some(witness) on infeasibility.
+    fn propagate_two_var(&mut self) -> Option<TheoryWitness> {
+        let snapshot = self.two_vars.clone();
+        for tv in &snapshot {
+            // For `x + y <= k`: x <= k - y_min (where y_min is y's lower bound).
+            let x_lo = self.bounds.get(&tv.x).and_then(|b| b.lower).map(|(v, _)| v);
+            let y_lo = self.bounds.get(&tv.y).and_then(|b| b.lower).map(|(v, _)| v);
+            match tv.op {
+                "<=" => {
+                    if let Some(y_low) = y_lo {
+                        // x <= k - y_low
+                        if let Some(w) = self.record_bound(tv.x.clone(), "<=", tv.k - y_low) {
+                            return Some(w);
+                        }
+                    }
+                    if let Some(x_low) = x_lo {
+                        if let Some(w) = self.record_bound(tv.y.clone(), "<=", tv.k - x_low) {
+                            return Some(w);
+                        }
+                    }
+                }
+                "<" => {
+                    if let Some(y_low) = y_lo {
+                        if let Some(w) = self.record_bound(tv.x.clone(), "<", tv.k - y_low) {
+                            return Some(w);
+                        }
+                    }
+                    if let Some(x_low) = x_lo {
+                        if let Some(w) = self.record_bound(tv.y.clone(), "<", tv.k - x_low) {
+                            return Some(w);
+                        }
+                    }
+                }
+                ">=" => {
+                    // x + y >= k means x >= k - y_max
+                    let y_up = self.bounds.get(&tv.y).and_then(|b| b.upper).map(|(v, _)| v);
+                    let x_up = self.bounds.get(&tv.x).and_then(|b| b.upper).map(|(v, _)| v);
+                    if let Some(y_max) = y_up {
+                        if let Some(w) = self.record_bound(tv.x.clone(), ">=", tv.k - y_max) {
+                            return Some(w);
+                        }
+                    }
+                    if let Some(x_max) = x_up {
+                        if let Some(w) = self.record_bound(tv.y.clone(), ">=", tv.k - x_max) {
+                            return Some(w);
+                        }
+                    }
+                }
+                ">" => {
+                    let y_up = self.bounds.get(&tv.y).and_then(|b| b.upper).map(|(v, _)| v);
+                    let x_up = self.bounds.get(&tv.x).and_then(|b| b.upper).map(|(v, _)| v);
+                    if let Some(y_max) = y_up {
+                        if let Some(w) = self.record_bound(tv.x.clone(), ">", tv.k - y_max) {
+                            return Some(w);
+                        }
+                    }
+                    if let Some(x_max) = x_up {
+                        if let Some(w) = self.record_bound(tv.y.clone(), ">", tv.k - x_max) {
+                            return Some(w);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
 
     /// Recognise `(<= x k)` / `(< x k)` / `(>= x k)` / `(> x k)`
     /// where `x` is a variable and `k` an integer literal.
@@ -138,8 +254,17 @@ impl Theory for LinArith {
     }
 
     fn assert(&mut self, lit: Literal) -> AssertResult {
+        // Try sum comparison first (v0.9).
+        if let Some((x, y, op, k)) = Self::parse_sum_comparison(&lit.term) {
+            let final_op = if lit.polarity {
+                op
+            } else {
+                match op { "<=" => ">", "<" => ">=", ">=" => "<", ">" => "<=", _ => return AssertResult::Ignored }
+            };
+            self.two_vars.push(TwoVar { x, y, op: final_op, k });
+            return AssertResult::Accepted;
+        }
         if !lit.polarity {
-            // Negated comparisons fold to the opposite bound.
             if let Some((var, op, k)) = Self::parse_comparison(&lit.term) {
                 let neg_op = match op {
                     "<=" => ">", "<" => ">=",
@@ -165,6 +290,10 @@ impl Theory for LinArith {
     }
 
     fn check(&mut self) -> CheckResult {
+        if let Some(w) = self.propagate_two_var() {
+            self.conflict = Some(w.clone());
+            return CheckResult::Unsat { witness: w };
+        }
         match &self.conflict {
             Some(w) => CheckResult::Unsat { witness: w.clone() },
             None => CheckResult::Sat,
@@ -178,13 +307,14 @@ impl Theory for LinArith {
     }
 
     fn push(&mut self) {
-        self.scope_stack.push(self.bounds.clone());
+        self.scope_stack.push((self.bounds.clone(), self.two_vars.clone()));
     }
 
     fn pop(&mut self, levels: u32) {
         for _ in 0..levels {
-            if let Some(prev) = self.scope_stack.pop() {
-                self.bounds = prev;
+            if let Some((b, tv)) = self.scope_stack.pop() {
+                self.bounds = b;
+                self.two_vars = tv;
             }
         }
         self.conflict = None;
@@ -192,6 +322,7 @@ impl Theory for LinArith {
 
     fn reset(&mut self) {
         self.bounds.clear();
+        self.two_vars.clear();
         self.conflict = None;
         self.scope_stack.clear();
     }
@@ -259,6 +390,38 @@ mod tests {
         t.assert(Literal::negative(le_term("x", 5)).unwrap());
         let r = t.assert(Literal::positive(le_term("x", 4)).unwrap());
         assert!(matches!(r, AssertResult::Conflict { .. }));
+    }
+
+    fn sum_le_term(x_name: &str, y_name: &str, k: i128) -> Term {
+        let op_ty = Type::fun(int_ty(), Type::fun(int_ty(), Type::bool_()).unwrap()).unwrap();
+        let plus_ty = Type::fun(int_ty(), Type::fun(int_ty(), int_ty()).unwrap()).unwrap();
+        let plus = Term::const_("+", plus_ty);
+        let le = Term::const_("<=", op_ty);
+        let x = Term::var(x_name, int_ty());
+        let y = Term::var(y_name, int_ty());
+        let sum = Term::app(Term::app(plus, x).unwrap(), y).unwrap();
+        let k_lit = Term::const_(&format!("int:{k}"), int_ty());
+        Term::app(Term::app(le, sum).unwrap(), k_lit).unwrap()
+    }
+
+    #[test]
+    fn fourier_motzkin_two_var_unsat() {
+        // x + y ≤ 5, x ≥ 3, y ≥ 3 → unsat (3 + 3 = 6 > 5)
+        let mut t = LinArith::lia();
+        t.assert(Literal::positive(ge_term("x", 3)).unwrap());
+        t.assert(Literal::positive(ge_term("y", 3)).unwrap());
+        t.assert(Literal::positive(sum_le_term("x", "y", 5)).unwrap());
+        assert!(matches!(t.check(), CheckResult::Unsat { .. }));
+    }
+
+    #[test]
+    fn fourier_motzkin_two_var_consistent_is_sat() {
+        // x + y ≤ 10, x ≥ 0, y ≥ 0 → sat
+        let mut t = LinArith::lia();
+        t.assert(Literal::positive(ge_term("x", 0)).unwrap());
+        t.assert(Literal::positive(ge_term("y", 0)).unwrap());
+        t.assert(Literal::positive(sum_le_term("x", "y", 10)).unwrap());
+        assert!(matches!(t.check(), CheckResult::Sat));
     }
 
     #[test]

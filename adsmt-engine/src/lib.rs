@@ -12,6 +12,8 @@ pub mod bool_solver;
 pub mod cadical_backend;
 pub mod cnf;
 pub mod dpllt;
+pub mod oxiz_backend;
+pub mod proof_bridge;
 pub mod quant;
 pub mod quant_conflict;
 pub mod result;

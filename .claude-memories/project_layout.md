@@ -25,6 +25,10 @@ logic, designed as a split sibling of logicutils. Workspace at
 - `external/logicutils/` — git submodule, branch `v0.x-smt`. Tracks
   upstream v0.2.0 commit `39ffc4b` as starting point; SMT-specific
   AST extensions (kind, fundep, overlap) live here.
+- **OxiZ** (https://github.com/cool-japan/oxiz, Apache 2.0) —
+  cargo dependency from v0.11 onward (Path A+B, see
+  `oxiz_relationship.md`). Pure-Rust Z3 reimplementation; adsmt's
+  identity is now "abductive + Lean4 layer on top of OxiZ".
 
 **Why this matters:**
 - Design rationale lives in

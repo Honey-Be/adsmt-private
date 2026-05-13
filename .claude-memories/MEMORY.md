@@ -1,3 +1,4 @@
 - [Project layout](project_layout.md) — adsmt SMT solver workspace + logicutils submodule
-- [adsmt ⇔ logicutils relationship](logicutils_version_rule.md) — version offset, immediate kb-syntax sync, v1.x merge plan
+- [adsmt ⇔ logicutils relationship](logicutils_version_rule.md) — version offset, immediate kb-syntax sync, 3-way v1.x merge plan
+- [adsmt ⇔ OxiZ relationship](oxiz_relationship.md) — Path A+B integration plan (P1-P5), v1.0 unified vision
 - [Design conversation pointer](design_conversation.md) — full design decisions live in .claude-conversations/

@@ -58,14 +58,17 @@ impl Combination {
     }
 
     /// Run `check` on each theory with Nelson-Oppen equality
-    /// propagation in between rounds.
+    /// propagation, followed by polite cardinality enforcement
+    /// (v0.9): if any sort's disequality clique exceeds its
+    /// cardinality bound, the combined system is unsat.
     ///
     /// Order per round:
-    /// 1. `check()` every theory (so each gets to run its own
-    ///    closures / propagation internals).
+    /// 1. `check()` every theory (closures, internal propagation).
     /// 2. Gather `derive_equalities` from every theory.
-    /// 3. Re-broadcast new ones via `assert`; if no new equalities,
-    ///    we're at fixpoint and return Sat.
+    /// 3. Re-broadcast new ones via `assert`; fixpoint → step 4.
+    /// 4. For each registered sort, compare its max disequality
+    ///    clique against the polite cardinality witness. If the
+    ///    clique exceeds the bound → unsat with a polite witness.
     pub fn check(&mut self) -> CombinedCheck {
         const PROP_BUDGET: usize = 8;
         let mut seen: Vec<(Term, Term)> = Vec::new();
@@ -97,7 +100,15 @@ impl Combination {
                     }
                 }
             }
-            if gathered.is_empty() { return CombinedCheck::Sat; }
+            if gathered.is_empty() {
+                // (4) Cardinality enforcement: gather disequalities
+                // from every theory, group by operand sort, and check
+                // each sort's clique size against its polite witness.
+                if let Some(unsat) = self.enforce_cardinality() {
+                    return unsat;
+                }
+                return CombinedCheck::Sat;
+            }
 
             // (3) Re-broadcast.
             for (a, b) in &gathered {
@@ -114,6 +125,44 @@ impl Combination {
             theory: "polite".into(),
             reason: "Nelson-Oppen propagation budget exhausted".into(),
         }
+    }
+
+    /// Polite combination cardinality enforcement (v0.9).
+    fn enforce_cardinality(&self) -> Option<CombinedCheck> {
+        use std::collections::HashMap;
+        // Gather all asserted disequalities, grouped by operand sort.
+        let mut diseqs_by_sort: HashMap<String, Vec<(Term, Term)>> = HashMap::new();
+        for t in &self.theories {
+            for (a, b) in t.derive_disequalities() {
+                let sort = a.type_of().to_string();
+                diseqs_by_sort.entry(sort).or_default().push((a, b));
+            }
+        }
+        // For each sort with a finite cardinality bound, check the
+        // disequality clique size.
+        for (sort_str, pairs) in &diseqs_by_sort {
+            let sort_ty = Type::const_(sort_str, adsmt_core::Kind::Type);
+            let bound = self
+                .theories
+                .iter()
+                .filter(|t| t.handles_sort(&sort_ty))
+                .filter_map(|t| t.cardinality_witness(&sort_ty).upper_bound)
+                .min();
+            let Some(bound) = bound else { continue; };
+            let clique = max_disequality_clique(pairs, bound as usize + 1);
+            if clique > bound as usize {
+                return Some(CombinedCheck::Unsat {
+                    theory: "polite".into(),
+                    witness: adsmt_cert::witness::TheoryWitness::Polite(
+                        adsmt_cert::witness::PoliteWitness {
+                            sort: sort_str.clone(),
+                            upper_bound: Some(bound),
+                        },
+                    ),
+                });
+            }
+        }
+        None
     }
 
     /// Reconcile cardinality witnesses for a sort across all theories.
@@ -165,6 +214,51 @@ impl Combination {
             t.pop(levels);
         }
     }
+}
+
+/// Find the size of the largest clique in the disequality graph
+/// induced by `pairs`, bounded by `limit`. NP-hard in general but
+/// SMT-typical inputs have tiny graphs.
+fn max_disequality_clique(pairs: &[(Term, Term)], limit: usize) -> usize {
+    use std::collections::HashSet;
+    // Vertex set: every term appearing in any pair.
+    let mut vertices: Vec<Term> = Vec::new();
+    for (a, b) in pairs {
+        if !vertices.iter().any(|v| v.alpha_eq(a)) { vertices.push(a.clone()); }
+        if !vertices.iter().any(|v| v.alpha_eq(b)) { vertices.push(b.clone()); }
+    }
+    // Adjacency check: are u, v in an asserted disequality?
+    let adj = |u: &Term, v: &Term| -> bool {
+        pairs.iter().any(|(a, b)| {
+            (a.alpha_eq(u) && b.alpha_eq(v)) || (a.alpha_eq(v) && b.alpha_eq(u))
+        })
+    };
+    // Greedy + Bron-Kerbosch-lite, bounded by `limit`.
+    let mut best = 0usize;
+    fn extend(
+        cur: &mut Vec<usize>,
+        candidates: HashSet<usize>,
+        vertices: &[Term],
+        adj: &impl Fn(&Term, &Term) -> bool,
+        best: &mut usize,
+        limit: usize,
+    ) {
+        if cur.len() > *best { *best = cur.len(); }
+        if *best >= limit { return; }
+        for &v in &candidates {
+            cur.push(v);
+            let new_candidates: HashSet<usize> = candidates
+                .iter()
+                .copied()
+                .filter(|&u| u != v && adj(&vertices[u], &vertices[v]))
+                .collect();
+            extend(cur, new_candidates, vertices, adj, best, limit);
+            cur.pop();
+        }
+    }
+    let all: HashSet<usize> = (0..vertices.len()).collect();
+    extend(&mut Vec::new(), all, &vertices, &adj, &mut best, limit);
+    best
 }
 
 #[derive(Clone, Debug)]

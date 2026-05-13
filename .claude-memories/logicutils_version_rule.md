@@ -48,23 +48,32 @@ bump (option C).
 same conceptual unit as the adsmt change. Update the parent repo's
 submodule pointer afterward so the two repos move together.
 
-## 3. Merge plan at adsmt v1.x (set 2026-05-13)
+## 3. Merge plan at adsmt v1.x — 3-way unification (revised 2026-05-13)
 
 Once adsmt reaches v1.x stability — the point at which the C ABI,
 SMT-LIB dialect, and proof certificate format are committed (per
-sec 34 Q68 / Q66) — the two repositories merge into a single
-project. The `v0.x-smt` branch is retired; lu-kb and adsmt become
-one workspace.
+sec 34 Q68 / Q66) — the v1.0 release **unifies three projects**:
 
-The merge target is a single workspace where:
-- the kb language is the user-facing surface,
-- the adsmt engine is the canonical kb backend,
-- the unified version drops the "+2" offset (becomes 1.0.0 in both).
+  adsmt v1.0  =  adsmt-core + logicutils + OxiZ (integrated form)
+
+Originally this was a 2-way (adsmt + logicutils) merge plan. Revised
+2026-05-13 when the user adopted Path A+B for OxiZ (see
+`oxiz_relationship.md`). The third leg — OxiZ — joins as either a
+pinned dependency or as the *substrate* into which adsmt folds (P5
+in `oxiz_relationship.md` chooses).
+
+Targets for the unified workspace:
+- lu-kb is the user-facing kb surface
+- OxiZ provides SAT + classical SMT theories + math + proof
+- adsmt provides abductive engine + HOL+HKT kernel + type-class
+  layer + Lean4 first-class + lu-kb integration
+- the unified version drops the "+2" offset (logicutils becomes
+  1.0.0; OxiZ continues its own line as upstream)
 
 **How to apply**: don't preemptively merge before v1.x. Until then,
-maintain the separation and apply rules (1) and (2). When v1.x lands,
-plan the merge as a coordinated release rather than incremental
-folding.
+maintain rules (1) and (2) for logicutils, run the OxiZ phased
+integration (P1-P5) per `oxiz_relationship.md`, and re-check the
+unified vision at every v0.x → v0.(x+1) bump.
 
-**Tracking**: this plan should be re-checked at every v0.x → v0.(x+1)
-bump to confirm it's still the chosen path.
+**Tracking**: re-check this plan whenever OxiZ has a material
+release or adsmt reaches a phase milestone.
