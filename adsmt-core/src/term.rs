@@ -408,6 +408,37 @@ impl Term {
     pub fn is_false_const(&self) -> bool {
         matches!(self, Term::Const(c) if c.name == "false")
     }
+
+    // === Quantifier built-ins (v0.3 quantifier handling) ===
+
+    /// Built-in `forall : (α -> Bool) -> Bool`, monomorphized at `arg_ty`.
+    pub fn forall_const(arg_ty: Type) -> KernelResult<Term> {
+        let pred_ty = Type::fun(arg_ty, Type::bool_())?;
+        let forall_ty = Type::fun(pred_ty, Type::bool_())?;
+        Ok(Term::const_("forall", forall_ty))
+    }
+
+    /// Build `∀v. body` from a bound variable and a Bool body.
+    pub fn mk_forall(v: Var, body: Term) -> KernelResult<Term> {
+        Self::require_bool(&body)?;
+        let arg_ty = v.ty.clone();
+        let lam = Term::lam(v, body);
+        Term::app(Term::forall_const(arg_ty)?, lam)
+    }
+
+    /// Destructure `∀v. body`, returning the binder and body.
+    pub fn dest_forall(&self) -> Option<(Var, Term)> {
+        if let Term::App(f, lam) = self {
+            if let Term::Const(c) = &**f {
+                if c.name == "forall" {
+                    if let Term::Lam(v, body) = &**lam {
+                        return Some(((**v).clone(), (**body).clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 fn extend_tyvars(dst: &mut Vec<Arc<TyVar>>, src: &[Arc<TyVar>]) {

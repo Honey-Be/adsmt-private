@@ -17,15 +17,28 @@ use crate::sexpr::SExpr;
 
 #[derive(Default, Clone, Debug)]
 pub struct SymbolTable {
-    /// Declared constants: name → type.
     consts: HashMap<String, Type>,
+    constructors: std::collections::HashSet<String>,
 }
 
 impl SymbolTable {
     pub fn new() -> Self { Self::default() }
 
+    /// Declare a free variable / constant (Term::Var on use).
     pub fn declare(&mut self, name: impl Into<String>, ty: Type) {
         self.consts.insert(name.into(), ty);
+    }
+
+    /// Declare a datatype constructor (Term::Const on use). Used by
+    /// the v0.3 datatype theory to recognise constructor disjointness.
+    pub fn declare_constructor(&mut self, name: impl Into<String>, ty: Type) {
+        let n = name.into();
+        self.consts.insert(n.clone(), ty);
+        self.constructors.insert(n);
+    }
+
+    pub fn is_constructor(&self, name: &str) -> bool {
+        self.constructors.contains(name)
     }
 
     pub fn lookup(&self, name: &str) -> Option<&Type> {
@@ -67,7 +80,11 @@ fn convert_symbol(s: &str, table: &SymbolTable) -> Result<Term, ConvertError> {
             let ty = table
                 .lookup(other)
                 .ok_or_else(|| ConvertError::UnknownSymbol(other.into()))?;
-            Ok(Term::var(other, ty.clone()))
+            if table.is_constructor(other) {
+                Ok(Term::const_(other, ty.clone()))
+            } else {
+                Ok(Term::var(other, ty.clone()))
+            }
         }
     }
 }

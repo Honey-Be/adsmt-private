@@ -11,6 +11,7 @@
 pub mod bool_solver;
 pub mod cnf;
 pub mod dpllt;
+pub mod quant;
 pub mod result;
 pub mod solver;
 pub mod state;

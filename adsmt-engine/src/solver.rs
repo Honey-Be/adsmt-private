@@ -11,7 +11,7 @@ use adsmt_theory::datatypes::Datatypes;
 use adsmt_theory::polite::Combination;
 use adsmt_theory::uf::Uf;
 
-use crate::bool_solver::{unit_propagate, BoolResult};
+use crate::bool_solver::{dpll, BoolResult};
 use crate::cnf::{flatten_to_clauses, Clause, Lit};
 use crate::dpllt::{self, LoopOutcome};
 use crate::result::{Abductive, SatResult};
@@ -146,9 +146,63 @@ impl Solver {
     }
 
     pub fn check_sat(&mut self) -> SatResult {
+        const QUANTIFIER_ROUNDS: usize = 3;
+
+        // v0.3 quantifier loop: at each round, partition asserted
+        // formulas into quantifiers and ground, then run the ground
+        // solver. If Sat, run a Miller-pattern E-matching pass and
+        // add fresh instantiations as ground assertions; loop again
+        // until either fixpoint or the round budget is exhausted.
+        let mut instantiations: Vec<Term> = Vec::new();
+        for _round in 0..QUANTIFIER_ROUNDS {
+            let mut combined = self.all_literals();
+            for inst in &instantiations {
+                combined.push((inst.clone(), true));
+            }
+            let outcome = self.check_ground(&combined);
+            match outcome {
+                SatResult::Sat => {
+                    // Try quantifier instantiation; if no new
+                    // instances, we're done at Sat.
+                    let (quants, rest) = crate::quant::partition_quantifiers(&combined);
+                    if quants.is_empty() {
+                        return SatResult::Sat;
+                    }
+                    let universe = crate::quant::collect_universe(&rest);
+                    let prev = instantiations.len();
+                    for (var, body) in &quants {
+                        for inst in crate::quant::instantiate_one(var, body, &universe) {
+                            if !instantiations.iter().any(|t| t.alpha_eq(&inst)) {
+                                instantiations.push(inst);
+                            }
+                        }
+                    }
+                    if instantiations.len() == prev {
+                        return SatResult::Sat;
+                    }
+                    // else loop with the extended assertion set
+                }
+                other => return other,
+            }
+        }
+        SatResult::Unknown {
+            reason: format!("quantifier instantiation budget ({QUANTIFIER_ROUNDS} rounds) exhausted"),
+        }
+    }
+
+    /// Ground (quantifier-free) reasoning over the given literals.
+    /// Internal helper used by both the surface `check_sat` and the
+    /// quantifier-instantiation loop.
+    fn check_ground(&mut self, lits: &[(Term, bool)]) -> SatResult {
+        // Strip quantifier asserts from the ground path — they're
+        // handled by the surrounding instantiation loop.
+        let (_quants, lits): (Vec<_>, Vec<_>) = lits
+            .iter()
+            .cloned()
+            .partition(|(t, p)| *p && t.dest_forall().is_some());
         // (1) Decompose every asserted (term, polarity) into CNF clauses.
         let mut clauses: Vec<Clause> = Vec::new();
-        let lits = self.all_literals();
+        let lits = lits;
         for (term, polarity) in &lits {
             let asserted = if *polarity {
                 term.clone()
@@ -176,8 +230,10 @@ impl Solver {
             }
         }
 
-        // (2) Run unit propagation over the clause set.
-        match unit_propagate(&clauses) {
+        // (2) Run DPLL (unit propagation + bounded decision splitting)
+        //     over the clause set. Decision depth budget 16 covers
+        //     typical SMT inputs while keeping worst-case bounded.
+        match dpll(&clauses, 16) {
             BoolResult::Sat => {
                 // Propagation found a satisfying assignment; theories
                 // may still reject. Route to theories as a second
@@ -396,15 +452,26 @@ mod tests {
     }
 
     #[test]
-    fn disjunction_alone_is_unknown_without_decisions() {
+    fn disjunction_alone_is_sat_via_decision_splitting() {
+        // (p ∨ q) alone — DPLL tries p=true → satisfies clause.
         let mut s = Solver::new();
         let p = Term::var("p", Type::bool_());
         let q = Term::var("q", Type::bool_());
         s.assert(Term::mk_or(p, q).unwrap());
-        match s.check_sat() {
-            SatResult::Unknown { .. } => {}
-            other => panic!("expected Unknown, got {other:?}"),
-        }
+        assert!(matches!(s.check_sat(), SatResult::Sat));
+    }
+
+    #[test]
+    fn unsat_requiring_branching() {
+        // (p ∨ q), (¬p ∨ q), (p ∨ ¬q), (¬p ∨ ¬q) → unsat (needs DPLL)
+        let mut s = Solver::new();
+        let p = Term::var("p", Type::bool_());
+        let q = Term::var("q", Type::bool_());
+        s.assert(Term::mk_or(p.clone(), q.clone()).unwrap());
+        s.assert(Term::mk_or(Term::mk_not(p.clone()).unwrap(), q.clone()).unwrap());
+        s.assert(Term::mk_or(p.clone(), Term::mk_not(q.clone()).unwrap()).unwrap());
+        s.assert(Term::mk_or(Term::mk_not(p).unwrap(), Term::mk_not(q).unwrap()).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
     }
 
     #[test]
@@ -482,6 +549,41 @@ mod tests {
         let red = Term::const_("Red", color.clone());
         let green = Term::const_("Green", color);
         s.assert(Term::mk_eq(red, green).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
+    }
+
+    // === v0.3 quantifier instantiation ===
+
+    #[test]
+    fn forall_with_ground_witness_routes_to_uf() {
+        // ∀x:Int. P x  ∧  P a is ground witness
+        //   ⟹  instantiation gives P a, which is already asserted → sat
+        use adsmt_core::Kind;
+        let int_ = Type::const_("Int", Kind::Type);
+        let p = Term::const_("P", Type::fun(int_.clone(), Type::bool_()).unwrap());
+        let a = Term::var("a", int_.clone());
+        let x = adsmt_core::Var { name: "x".into(), ty: int_.clone() };
+        let body = Term::app(p.clone(), Term::Var(std::sync::Arc::new(x.clone()))).unwrap();
+        let forall = Term::mk_forall(x, body).unwrap();
+        let mut s = Solver::new();
+        s.assert(forall);
+        s.assert(Term::app(p, a).unwrap());
+        assert!(matches!(s.check_sat(), SatResult::Sat));
+    }
+
+    #[test]
+    fn forall_combined_with_negation_is_unsat() {
+        // ∀x:Int. P x  ∧  ¬(P a)  ⟹  instantiate at a → contradiction.
+        use adsmt_core::Kind;
+        let int_ = Type::const_("Int", Kind::Type);
+        let p = Term::const_("P", Type::fun(int_.clone(), Type::bool_()).unwrap());
+        let a = Term::var("a", int_.clone());
+        let x = adsmt_core::Var { name: "x".into(), ty: int_ };
+        let body = Term::app(p.clone(), Term::Var(std::sync::Arc::new(x.clone()))).unwrap();
+        let forall = Term::mk_forall(x, body).unwrap();
+        let mut s = Solver::new();
+        s.assert(forall);
+        s.assert(Term::mk_not(Term::app(p, a).unwrap()).unwrap());
         assert!(matches!(s.check_sat(), SatResult::Unsat { .. }));
     }
 }

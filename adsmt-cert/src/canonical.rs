@@ -129,6 +129,42 @@ impl CertBuilder {
     pub fn finalize(self, conclusion: StepId) -> Certificate {
         Certificate { steps: self.steps, conclusion }
     }
+
+    /// Mark the current step count as a delta checkpoint. Subsequent
+    /// calls to [`steps_since`] return only steps added after this
+    /// checkpoint.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint(self.steps.len())
+    }
+
+    /// Steps added after `cp`. Used by incremental solving to emit
+    /// a delta certificate per `check-sat` rather than re-streaming
+    /// the entire proof (sec 30 / Q49).
+    pub fn steps_since(&self, cp: Checkpoint) -> &[Step] {
+        &self.steps[cp.0.min(self.steps.len())..]
+    }
+
+    /// All steps as a slice.
+    pub fn steps(&self) -> &[Step] { &self.steps }
+}
+
+/// Opaque marker for [`CertBuilder::steps_since`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Checkpoint(pub usize);
+
+impl Checkpoint {
+    pub fn start() -> Self { Self(0) }
+}
+
+/// A delta-form certificate: a contiguous slice of steps plus the
+/// conclusion id within the wider proof. The emitter renders these
+/// as `(proof-delta :since <prev-id> ... (conclude ...))` per sec 30.
+#[derive(Clone, Debug)]
+pub struct CertificateDelta {
+    /// Step index where this delta begins.
+    pub since: usize,
+    pub steps: Vec<Step>,
+    pub conclusion: StepId,
 }
 
 #[cfg(test)]
@@ -166,6 +202,23 @@ mod tests {
         let cert = b.finalize(s0);
         assert_eq!(cert.conclusion, s0);
         assert!(cert.final_sequent().is_some());
+    }
+
+    #[test]
+    fn checkpoint_and_delta_steps() {
+        let mut b = CertBuilder::new();
+        let x = Term::var("x", int_());
+        let _ = b.add(
+            StepBody::Refl(x.clone()),
+            Sequent { hyps: vec![], concl: Term::mk_eq(x.clone(), x.clone()).unwrap() },
+        );
+        let cp = b.checkpoint();
+        assert_eq!(b.steps_since(cp).len(), 0);
+        let _ = b.add(
+            StepBody::Refl(x.clone()),
+            Sequent { hyps: vec![], concl: Term::mk_eq(x.clone(), x).unwrap() },
+        );
+        assert_eq!(b.steps_since(cp).len(), 1);
     }
 
     #[test]

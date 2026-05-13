@@ -26,6 +26,21 @@ pub fn emit_certificate(cert: &Certificate) -> String {
     out
 }
 
+/// Emit a delta certificate covering steps added since a previous
+/// checkpoint. Per sec 30, used in incremental mode so each
+/// `check-sat` call streams only fresh steps.
+pub fn emit_certificate_delta(delta: &crate::canonical::CertificateDelta) -> String {
+    let mut out = String::new();
+    writeln!(out, "(proof-delta :since s{}", delta.since).unwrap();
+    for step in &delta.steps {
+        out.push_str("  ");
+        emit_step(step, &mut out);
+        out.push('\n');
+    }
+    writeln!(out, "  (conclude {}))", id_token(delta.conclusion)).unwrap();
+    out
+}
+
 fn emit_step(step: &Step, out: &mut String) {
     write!(out, "({} ", id_token(step.id)).unwrap();
     emit_body(&step.body, out);
@@ -466,5 +481,23 @@ mod tests {
     fn emit_quotes_strings_with_specials() {
         let q = quote_string("hello \"world\"\n");
         assert_eq!(q, r#""hello \"world\"\n""#);
+    }
+
+    #[test]
+    fn emit_delta_only_includes_new_steps() {
+        let mut b = CertBuilder::new();
+        let x = Term::var("x", int_());
+        let _ = r::refl(&mut b, &x).unwrap();
+        let cp = b.checkpoint();
+        let h2 = r::refl(&mut b, &x).unwrap();
+        let delta = crate::canonical::CertificateDelta {
+            since: cp.0,
+            steps: b.steps_since(cp).to_vec(),
+            conclusion: h2.step,
+        };
+        let out = emit_certificate_delta(&delta);
+        assert!(out.starts_with("(proof-delta :since s1"));
+        assert!(out.contains("(s1 (refl"));
+        assert!(!out.contains("(s0 (refl"));
     }
 }

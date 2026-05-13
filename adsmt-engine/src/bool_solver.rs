@@ -17,6 +17,103 @@ pub enum BoolResult {
     Unknown,
 }
 
+/// Decision-splitting DPLL with bounded depth. Combines unit
+/// propagation with backtracking case splits over unassigned atoms.
+/// At depth 0 this is the same as [`unit_propagate`].
+pub fn dpll(clauses: &[Clause], max_depth: usize) -> BoolResult {
+    let assign = HashMap::new();
+    dpll_rec(clauses, assign, max_depth)
+}
+
+fn dpll_rec(
+    clauses: &[Clause],
+    assign: HashMap<String, bool>,
+    depth_budget: usize,
+) -> BoolResult {
+    // Run unit propagation to fixpoint, extending `assign`.
+    let propagated = propagate_with(clauses, assign);
+    let assign = match propagated {
+        PropOutcome::Conflict => return BoolResult::Unsat,
+        PropOutcome::Fixed(a) => a,
+    };
+
+    // All clauses satisfied?
+    let mut all_sat = true;
+    let mut decision_atom: Option<(String, &Lit)> = None;
+    for clause in clauses {
+        match evaluate_clause(clause, &assign) {
+            ClauseEval::Satisfied => {}
+            ClauseEval::Falsified => return BoolResult::Unsat,
+            ClauseEval::Unit(_) => unreachable!("propagation drained all units"),
+            ClauseEval::Open => {
+                all_sat = false;
+                // Pick a candidate atom to decide on: first
+                // unassigned literal of the first open clause.
+                if decision_atom.is_none() {
+                    for lit in clause {
+                        let key = atom_key(lit);
+                        if !assign.contains_key(&key) {
+                            decision_atom = Some((key, lit));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if all_sat { return BoolResult::Sat; }
+    if depth_budget == 0 { return BoolResult::Unknown; }
+
+    let (key, _lit) = match decision_atom {
+        Some(d) => d,
+        None => return BoolResult::Unknown,
+    };
+
+    // Try assigning true first.
+    let mut a_true = assign.clone();
+    a_true.insert(key.clone(), true);
+    match dpll_rec(clauses, a_true, depth_budget - 1) {
+        BoolResult::Sat => return BoolResult::Sat,
+        BoolResult::Unsat => {} // try the other branch
+        BoolResult::Unknown => return BoolResult::Unknown,
+    }
+
+    let mut a_false = assign;
+    a_false.insert(key, false);
+    dpll_rec(clauses, a_false, depth_budget - 1)
+}
+
+enum PropOutcome {
+    Conflict,
+    Fixed(HashMap<String, bool>),
+}
+
+fn propagate_with(
+    clauses: &[Clause],
+    mut assign: HashMap<String, bool>,
+) -> PropOutcome {
+    loop {
+        let mut progress = false;
+        for clause in clauses {
+            match evaluate_clause(clause, &assign) {
+                ClauseEval::Satisfied | ClauseEval::Open => continue,
+                ClauseEval::Falsified => return PropOutcome::Conflict,
+                ClauseEval::Unit(lit) => {
+                    let key = atom_key(&lit);
+                    if let Some(&v) = assign.get(&key) {
+                        if v != lit.polarity { return PropOutcome::Conflict; }
+                    } else {
+                        assign.insert(key, lit.polarity);
+                        progress = true;
+                    }
+                }
+            }
+        }
+        if !progress { break; }
+    }
+    PropOutcome::Fixed(assign)
+}
+
 /// Run unit propagation on `clauses`.
 pub fn unit_propagate(clauses: &[Clause]) -> BoolResult {
     // Atom assignment: atom-as-string-of-display → polarity.
@@ -139,6 +236,27 @@ mod tests {
         // (p ∨ q) — no way to decide without branching.
         let cs = vec![vec![Lit::pos(p()), Lit::pos(q())]];
         assert_eq!(unit_propagate(&cs), BoolResult::Unknown);
+    }
+
+    #[test]
+    fn dpll_decides_lone_disjunction() {
+        // (p ∨ q) alone — propagation alone says Unknown; DPLL
+        // tries p=true → satisfies clause → Sat.
+        let cs = vec![vec![Lit::pos(p()), Lit::pos(q())]];
+        assert_eq!(dpll(&cs, 4), BoolResult::Sat);
+    }
+
+    #[test]
+    fn dpll_unsat_via_branching() {
+        // (p ∨ q) ∧ (¬p ∨ q) ∧ (p ∨ ¬q) ∧ (¬p ∨ ¬q) — classic
+        // pigeonhole-style 2-var unsat that requires both branches.
+        let cs = vec![
+            vec![Lit::pos(p()), Lit::pos(q())],
+            vec![Lit::neg(p()), Lit::pos(q())],
+            vec![Lit::pos(p()), Lit::neg(q())],
+            vec![Lit::neg(p()), Lit::neg(q())],
+        ];
+        assert_eq!(dpll(&cs, 4), BoolResult::Unsat);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import Lean
 import Adsmt.Solver
+import Adsmt.Translate
 
 /-!
 # Tactics
@@ -80,24 +81,38 @@ syntax (name := smt) "smt" : tactic
 @[tactic smt]
 def evalSmt : Tactic := fun _ => do
   let hyps ← collectHyps
+  -- v0.3: render the context as an SMT-LIB-style script for
+  -- diagnostics. The infrastructure runs every invocation; when
+  -- elaboration-time FFI lands in v0.5 we'll send this to the engine.
+  let mut state : Adsmt.Translate.State := default
+  let mut script : Array String := #[]
+  for h in hyps do
+    let body := h.body
+    let (s, state') := StateT.run (Adsmt.Translate.translate body) state |>.run
+    state := state'
+    let line := if h.polarity then s!"(assert {s})" else s!"(assert (not {s}))"
+    script := script.push line
+  let goalType ← (← getMainGoal).getType
+  if (← isProp goalType) then
+    let (g, _) := StateT.run (Adsmt.Translate.translate goalType) state |>.run
+    script := script.push s!"(goal {g})"
+  let _ := script  -- bound for v0.5 FFI use; suppressed for now
+
   match (← findContradiction hyps) with
   | some (posF, negF) =>
       let goal ← getMainGoal
       let posExpr := mkFVar posF
       let negExpr := mkFVar negF
-      -- For goal `False`: apply negExpr to posExpr.
-      -- For arbitrary `Q`: use `absurd` (auto-elimination).
       let goalType ← goal.getType
-      let falseProof := mkApp negExpr posExpr  -- of type `False`
+      let falseProof := mkApp negExpr posExpr
       if goalType.isConstOf ``False then
         goal.assign falseProof
       else
-        -- `False.elim : {C : Sort u} → False → C`
         let proof ← mkAppOptM ``False.elim #[some goalType, some falseProof]
         goal.assign proof
       replaceMainGoal []
   | none =>
-      throwError "adsmt smt (v0.1): no direct (h₁ : P, h₂ : ¬P) pair found in context"
+      throwError "adsmt smt (v0.3): no direct (h₁ : P, h₂ : ¬P) pair found in context"
 
 /--
 `smt_abduce` — abductive variant of `smt`.

@@ -13,5 +13,6 @@ path = "src/main.rs"
 adsmt-core.workspace = true
 adsmt-engine.workspace = true
 adsmt-parser.workspace = true
+adsmt-theory.workspace = true
 clap.workspace = true
 thiserror.workspace = true

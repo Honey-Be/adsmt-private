@@ -32,6 +32,9 @@ pub enum Command {
     SetOption { keyword: String, value: SExpr },
     SetInfo { keyword: String, value: SExpr },
     DeclareSort { name: String, arity: u32 },
+    /// `(declare-datatype Name ((Ctor1) (Ctor2) ...))` — v0.3 minimal
+    /// form supporting only nullary (enum) constructors.
+    DeclareDatatype { name: String, constructors: Vec<String> },
     DeclareConst { name: String, sort: SExpr },
     DeclareFun { name: String, params: Vec<SExpr>, result: SExpr },
     DefineFun { name: String, params: Vec<SExpr>, result: SExpr, body: SExpr },
@@ -102,6 +105,41 @@ fn parse_command(s: SExpr) -> Result<Command, SmtLibError> {
                     message: "arity must be a numeric literal".into(),
                 })?;
             Ok(Command::DeclareSort { name, arity })
+        }
+        "declare-datatype" => {
+            let name = expect_symbol(list.get(1), "declare-datatype")?;
+            let ctors_sexpr = list.get(2).ok_or_else(|| SmtLibError::Malformed {
+                cmd: head.clone(),
+                message: "missing constructor list".into(),
+            })?;
+            let ctor_list = ctors_sexpr.as_list().ok_or_else(|| SmtLibError::Malformed {
+                cmd: head.clone(),
+                message: "expected constructor list".into(),
+            })?;
+            let mut constructors = Vec::with_capacity(ctor_list.len());
+            for c in ctor_list {
+                // Each constructor is either a bare symbol `Foo` or a
+                // list `(Foo)` (nullary). v0.3 supports nullary only.
+                let cname = match c {
+                    SExpr::Symbol(s) => s.clone(),
+                    SExpr::List(inner) if inner.len() == 1 => {
+                        inner[0].as_symbol().map(|s| s.to_string()).ok_or_else(|| {
+                            SmtLibError::Malformed {
+                                cmd: head.clone(),
+                                message: "constructor must be a symbol".into(),
+                            }
+                        })?
+                    }
+                    _ => {
+                        return Err(SmtLibError::Malformed {
+                            cmd: head.clone(),
+                            message: "v0.3 only supports nullary constructors".into(),
+                        });
+                    }
+                };
+                constructors.push(cname);
+            }
+            Ok(Command::DeclareDatatype { name, constructors })
         }
         "declare-const" => {
             let name = expect_symbol(list.get(1), "declare-const")?;

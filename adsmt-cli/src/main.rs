@@ -24,6 +24,7 @@ use clap::Parser as ClapParser;
 
 use adsmt_core::{Term, Type};
 use adsmt_engine::{SatResult, Solver};
+use adsmt_theory;
 use adsmt_parser::{convert_expr, parse_smtlib, ConvertError, SymbolTable};
 use adsmt_parser::sexpr::SExpr;
 use adsmt_parser::smtlib::Command;
@@ -133,16 +134,30 @@ impl Driver {
             Command::SetOption { .. } | Command::SetInfo { .. } => DispatchResult::Continue,
             Command::DeclareConst { name, sort } => {
                 let sort_str = sort.to_string();
-                if sort_str != "Bool" {
-                    return DispatchResult::Error(
-                        11,
-                        format!("declare-const '{name}': v0.3 supports only `Bool` sort (got `{sort_str}`)"),
-                    );
-                }
-                self.symbols.declare(name, Type::bool_());
+                let ty = match sort_str.as_str() {
+                    "Bool" => Type::bool_(),
+                    "Int" => Type::const_("Int", adsmt_core::Kind::Type),
+                    "Real" => Type::const_("Real", adsmt_core::Kind::Type),
+                    other => {
+                        // Treat any other sort name as a previously
+                        // declared sort or datatype. v0.5 will
+                        // validate against a sort registry.
+                        Type::const_(other, adsmt_core::Kind::Type)
+                    }
+                };
+                self.symbols.declare(name, ty);
                 DispatchResult::Continue
             }
             Command::DeclareSort { .. } | Command::DeclareFun { .. } | Command::DefineFun { .. } => {
+                DispatchResult::Continue
+            }
+            Command::DeclareDatatype { name, constructors } => {
+                use adsmt_theory::datatypes::DatatypeDecl;
+                let sort = Type::const_(&name, adsmt_core::Kind::Type);
+                for ctor in &constructors {
+                    self.symbols.declare_constructor(ctor.clone(), sort.clone());
+                }
+                self.solver.declare_datatype(DatatypeDecl::finite_enum(name, constructors));
                 DispatchResult::Continue
             }
             Command::Assert(expr) => match self.assert_expr(&expr) {

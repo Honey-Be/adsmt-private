@@ -1,6 +1,7 @@
 import Adsmt.Ffi
 import Adsmt.Solver
 import Adsmt.Tactic
+import Adsmt.Translate
 
 /-!
 # adsmt: Lean4 bindings

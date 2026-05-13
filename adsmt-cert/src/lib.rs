@@ -10,7 +10,7 @@ pub mod emit;
 pub mod recorder;
 pub mod witness;
 
-pub use canonical::{CertBuilder, Certificate, Sequent, Step, StepBody, StepId};
-pub use emit::emit_certificate;
+pub use canonical::{CertBuilder, Certificate, CertificateDelta, Checkpoint, Sequent, Step, StepBody, StepId};
+pub use emit::{emit_certificate, emit_certificate_delta};
 pub use recorder::{ProofHandle, recorder as r};
 pub use witness::{InstanceWitness, TheoryWitness};
