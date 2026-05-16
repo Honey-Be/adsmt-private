@@ -15,6 +15,7 @@ pub mod dpllt;
 pub mod drat_trim;
 pub mod oxiz_backend;
 pub mod oxiz_drat;
+pub mod oxiz_drat_bridge;
 pub mod oxiz_proof_emit;
 pub mod proof_bridge;
 pub mod quant;

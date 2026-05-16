@@ -29,8 +29,10 @@ cadical = ["dep:cadical"]
 # (see .claude-memories/oxiz_relationship.md).
 oxiz = ["dep:oxiz-sat"]
 # Also pull in oxiz-proof for Alethe/LFSC byte-form proof emission
-# (v0.15 P3). Implies `oxiz`.
-oxiz-proof = ["oxiz", "dep:oxiz-proof"]
+# (v0.15 P3) and the P4 cert ⇄ oxiz-proof rich bridge. Implies
+# `oxiz` and turns on adsmt-cert's matching feature so the
+# `oxiz_drat_bridge::bridge` module is callable.
+oxiz-proof = ["oxiz", "dep:oxiz-proof", "adsmt-cert/oxiz-proof"]
 # Enable external `drat-trim` binary cross-check verification of
 # the DRAT bytes produced under the `oxiz` feature. drat-trim must
 # be available on `$PATH`; otherwise the check returns
