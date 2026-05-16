@@ -46,6 +46,9 @@ fn emit_step(step: &Step, out: &mut String) {
     emit_body(&step.body, out);
     out.push(' ');
     emit_sequent(&step.result, out);
+    if let Some(loc) = step.source_loc {
+        write!(out, " :loc {}:{}", loc.line, loc.column).unwrap();
+    }
     out.push(')');
 }
 
@@ -568,5 +571,26 @@ mod tests {
         assert!(out.starts_with("(proof-delta :since s1"));
         assert!(out.contains("(s1 (refl"));
         assert!(!out.contains("(s0 (refl"));
+    }
+
+    #[test]
+    fn emit_renders_source_loc_when_present() {
+        use crate::canonical::SourceLoc;
+        let mut b = CertBuilder::new();
+        let p = Term::var("p", Type::bool_());
+        let h = r::assume_at(&mut b, p, Some(SourceLoc::new(42, 7))).unwrap();
+        let cert = b.finalize(h.step);
+        let out = emit_certificate(&cert);
+        assert!(out.contains(":loc 42:7"));
+    }
+
+    #[test]
+    fn emit_omits_loc_keyword_when_absent() {
+        let mut b = CertBuilder::new();
+        let p = Term::var("p", Type::bool_());
+        let h = r::assume(&mut b, p).unwrap();
+        let cert = b.finalize(h.step);
+        let out = emit_certificate(&cert);
+        assert!(!out.contains(":loc"));
     }
 }
